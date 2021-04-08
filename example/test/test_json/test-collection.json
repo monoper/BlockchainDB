@@ -1,0 +1,12 @@
+{
+    "blockType" : "CREATE",
+    "transaction": {
+        "collectionName":"TestCollection",
+        "id":"SomeGuidId",
+        "payload":{
+            "id": "SomeGuidId",
+            "Other":"One",
+            "Two" : "Other1"
+        }
+    }
+}

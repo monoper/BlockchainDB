@@ -1,0 +1,45 @@
+version: "3.8"
+services:
+  db1:
+    build:
+      context: .
+      args:
+        - CONNECTION_STRING=mongodb+srv://db_user:Alaska2017@cluster0.4bpaq.mongodb.net/blockmedi?retryWrites=true&w=majority
+        - DATABASE=blockchain
+        - USER_POOL_ID=ap-southeast-2_cYdQXzvTX
+        - USER_POOL_WEB_CLIENT_ID=1r0njccgg2onopmp9pie57ih8h
+        - NODES=[]
+    ports:
+      - '5001:443'
+    #depends_on:
+    #  - mongo     
+  #db2:
+  #  build: 
+  #    context: .
+  #    args:
+  #      - CONNECTION_STRING=mongo
+  #      - DATABASE=blockchain
+  #      - USER_POOL_ID=ap-southeast-2_cYdQXzvTX
+  #      - USER_POOL_WEB_CLIENT_ID=1r0njccgg2onopmp9pie57ih8h
+  #      - NODES=["http://db1"]
+  #  ports:
+  #    - '5002:443'
+  #  depends_on:
+  #    - mongo       
+  #lb:
+  #  image: dockercloud/haproxy
+  #  links:
+  #   - db1
+  #   - db2
+  #  ports:
+  #   - '5000:443'
+  #  volumes:
+  #    - /var/run/docker.sock:/var/run/docker.sock
+  #mongo:
+  #  image: mongo
+  #  volumes:
+  #    - ./mongo-volume:/data/db
+  #  ports:
+  #   - 27017-27019:27017-27019
+  #  logging:
+  #    driver: none

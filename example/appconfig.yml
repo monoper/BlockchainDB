@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+  GithubBranch:
+    Type: String
+    Default: main
+  GithubOwner:
+    Type:  'AWS::SSM::Parameter::Value<String>'
+    Default: GithubOwner
+Resources:
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: TaskDefinition
+    Properties:
+      ServiceName: !Sub ${AWS::StackName}
+      Cluster:
+        Fn::ImportValue:
+          !Sub ${Environment}:blockmedi:cluster-arn
+      LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDefinition  
+      DesiredCount: 0
+      LoadBalancers:
+        - ContainerName: !Sub ${AWS::StackName}
+          ContainerPort: 443
+          TargetGroupArn: !Ref 'TargetGroup'      
+      ServiceRegistries:
+        - RegistryArn: !GetAtt DiscoveryService.Arn
+          Port: 443
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - Fn::ImportValue:
+                !Sub ${Environment}:blockmedi:PublicSubnetOne
+            - Fn::ImportValue:
+                !Sub ${Environment}:blockmedi:PublicSubnetTwo
+          SecurityGroups:
+            - Fn::ImportValue:
+                !Sub ${Environment}:blockmedi:ContainerSecurityGroup
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: Repository
+    Properties:
+      Memory: 512
+      NetworkMode: awsvpc
+      Cpu: 256
+      RequiresCompatibilities:
+        - FARGATE
+      TaskRoleArn: !Ref ECSTaskRole
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole   
+      ContainerDefinitions:
+        - Name: !Sub ${AWS::StackName}
+          Image: !Ref Repository
+          Environment:
+            - Name: CONNECTION_STRING
+              Value: !Sub '{{resolve:secretsmanager:arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mongo-connection-p0PIP1:SecretString:mongo}}'
+            - Name: DATABASE
+              Value: 'blockmedi'
+            - Name: USER_POOL_ID
+              Value:
+                Fn::ImportValue: !Sub ${Environment}:blockmedi:UserPoolId
+            - Name: USER_POOL_WEB_CLIENT_ID
+              Value:
+                Fn::ImportValue: !Sub ${Environment}:blockmedi:UserPoolClient            
+            - Name: ECS_ENABLE_CONTAINER_METADATA
+              Value: 'true'      
+          PortMappings:
+            - ContainerPort: 443       
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: blockmedi
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-ExecutionRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        #- PolicyName: ecs-task-execution
+        #  PolicyDocument:
+        #      Version: 2012-10-17
+        #      Statement:
+        #        - Effect: Allow
+        #          Action:
+        #            - ecr:GetAuthorizationToken
+        #            - ecr:BatchCheckLayerAvailability
+        #            - ecr:GetDownloadUrlForLayer
+        #            - ecr:BatchGetImage
+        #            - logs:CreateLogStream
+        #            - logs:PutLogEvent
+        #          Resource: '*'
+        - PolicyName: ecs-service-discovery
+          PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - servicediscovery:RegisterInstance
+                    - servicediscovery:DeregisterInstance
+                    - servicediscovery:DiscoverInstances
+                    - servicediscovery:Get*
+                    - servicediscovery:List*
+                    - route53:GetHostedZone
+                    - route53:ListHostedZonesByName
+                    - route53:ChangeResourceRecordSets
+                    - route53:CreateHealthCheck
+                    - route53:GetHealthCheck
+                    - route53:DeleteHealthCheck
+                    - route53:UpdateHealthCheck
+                    - ec2:DescribeInstance
+                  Resource: '*'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-TaskRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ecs-service-discovery
+          PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - servicediscovery:DiscoverInstances
+                    - servicediscovery:Get*
+                    - servicediscovery:List*
+                  Resource: '*'
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 120
+      HealthCheckPath: /api/health
+      HealthCheckProtocol: HTTPS
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Port: 443
+      Protocol: HTTPS
+      UnhealthyThresholdCount: 2
+      VpcId:
+        Fn::ImportValue: !Sub ${Environment}:blockmedi:VPCId
+  PrivateNamespace:
+      Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+      Properties:
+          Name: !Sub backend.api.${Environment}.blockmedisolutions.com
+          Vpc:
+            Fn::ImportValue: !Sub ${Environment}:blockmedi:VPCId
+  DiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties: 
+      Description: Discovery Service for the backend service
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords:
+          - TTL: 60
+            Type: A
+          - TTL: 60
+            Type: SRV
+      HealthCheckCustomConfig: 
+        FailureThreshold: 1
+      Name: !Sub backend.api.${Environment}.blockmedisolutions.com
+      NamespaceId: !Ref PrivateNamespace
+  # Create a rule on the load balancer for routing traffic to the target group
+
+  PublicLBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: 'forward'
+      LoadBalancerArn: 
+        Fn::ImportValue: 
+          !Sub ${Environment}:blockmedi:PublicLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: 
+            Fn::ImportValue:
+              !Sub ${Environment}:blockmedi:environment-certificate
+
+  CloudWatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref AWS::StackName
+      RetentionInDays: 365
+  
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    DependsOn:
+      - Repository
+      - S3BuildArtifacts
+    Properties:
+      Artifacts: 
+        Type: CODEPIPELINE
+      Environment: 
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: True
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: ECR_REPOSITORY_URI
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repository}
+      Name: !Sub ${Environment}-${AWS::StackName}-cb
+      ServiceRole: !Ref CodeBuildExecutionRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+
+  S3BuildArtifacts:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Environment}-${AWS::StackName}-cicd-artifacts
+  Repository:
+    Type: AWS::ECR::Repository
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties: 
+      ArtifactStore: 
+        Location: !Ref S3BuildArtifacts
+        Type: S3
+      Name: !Sub ${Environment}-${AWS::StackName}-cicd
+      RestartExecutionOnUpdate: False
+      RoleArn: 
+        Fn::GetAtt: [ CodePipelineExecutionRole, Arn ]
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Repo: 'Blockmedi.BlockchainDB'
+                Branch: !Ref GithubBranch
+                Owner: !Ref GithubOwner
+                OAuthToken: !Sub '{{resolve:secretsmanager:arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:GithubToken-b5jetG:SecretString:GithubToken}}'
+              Region: !Ref "AWS::Region"
+              RunOrder: 1
+              OutputArtifacts:
+                - Name: source-output-artifacts
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: "1"
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: build-output-artifacts
+              InputArtifacts:
+                - Name: source-output-artifacts
+              Configuration:
+                ProjectName: !Ref CodeBuild
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: DeployTask
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: ECS
+              Configuration:
+                ClusterName: 
+                  Fn::ImportValue:
+                    !Sub ${Environment}:blockmedi:cluster-arn
+                ServiceName: !GetAtt Service.Name
+                FileName: images.json
+              InputArtifacts:
+                - Name: build-output-artifacts
+              RunOrder: 1
+  CloudFormationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  CodePipelineExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  CodeBuildExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+Outputs:
+  ServiceName:
+    Description: Service name
+    Value: !GetAtt Service.Name
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', "service-name" ] ]
+  TaskDefinition:
+    Value: !Ref TaskDefinition
+    Export:
+      Name: !Join [":", [ !Ref Environment, !Ref 'AWS::StackName', "task-definition" ]]
+  Repository:
+    Description: Service name
+    Value: !Ref Repository
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', "repository" ] ] 

@@ -1,0 +1,32 @@
+version: 0.2
+env:
+  MONGO_CONNECTION: MONGO_CONNECTION
+
+phases:
+  install:
+    runtime-versions:
+      docker: 18
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws --version
+      - $(aws ecr get-login --region $AWS_DEFAULT_REGION --no-include-email)
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${COMMIT_HASH:=latest}
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Building the Docker image...
+      - echo building image with tag $IMAGE_TAG
+      - docker build --build-arg CONNECTION_STRING=${MONGO_CONNECTION} --build-arg DATABASE=blockmedi --build-arg USER_POOL_ID=ap-southeast-2_eIMyw9ItK --build-arg USER_POOL_WEB_CLIENT_ID=5p4amibna6j5kfcbgqaqr9pfa6 -t $ECR_REPOSITORY_URI:latest .
+      - docker tag $ECR_REPOSITORY_URI:latest $ECR_REPOSITORY_URI:$IMAGE_TAG
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing the Docker images...
+      - docker push $ECR_REPOSITORY_URI:latest
+      - docker push $ECR_REPOSITORY_URI:$IMAGE_TAG
+      
+      - printf '[{"name":"blockmedi-backend","imageUri":"%s"}]' "$ECR_REPOSITORY_URI:$IMAGE_TAG" > images.json
+artifacts:
+  files: images.json
