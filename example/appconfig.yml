@@ -3,12 +3,38 @@ Parameters:
   Environment:
     Type: String
     Default: dev
+  BaseStackName:
+    Type: String
+    Default: StackName
+  BaseDNSName:
+    Type: String
+    Default: DNSName
+  DatabaseName:
+    Type: String
+    Default: Database
+  GithubRepoName:
+    Type: String
+    Default: Repo
   GithubBranch:
     Type: String
     Default: main
   GithubOwner:
     Type:  'AWS::SSM::Parameter::Value<String>'
     Default: GithubOwner
+  #Secret Store Parameter
+  GithubTokenName:
+    Type: String
+    Default: GithubTokenName
+  GithubTokenFullName:
+    Type: String
+    Default: GithubTokenFullName
+  #Secret Store Parameter
+  DatastoreConnectionString:
+    Type: String
+    Default: DatastoreConnectionString
+  DatastoreConnectionStringName:
+    Type: String
+    Default: DatastoreConnectionStringName
 Resources:
   Service:
     Type: AWS::ECS::Service
@@ -17,7 +43,7 @@ Resources:
       ServiceName: !Sub ${AWS::StackName}
       Cluster:
         Fn::ImportValue:
-          !Sub ${Environment}:blockmedi:cluster-arn
+          !Sub ${Environment}:${BaseStackName}:cluster-arn
       LaunchType: FARGATE
       TaskDefinition: !Ref TaskDefinition  
       DesiredCount: 0
@@ -33,12 +59,12 @@ Resources:
           AssignPublicIp: ENABLED
           Subnets:
             - Fn::ImportValue:
-                !Sub ${Environment}:blockmedi:PublicSubnetOne
+                !Sub ${Environment}:${BaseStackName}:PublicSubnetOne
             - Fn::ImportValue:
-                !Sub ${Environment}:blockmedi:PublicSubnetTwo
+                !Sub ${Environment}:${BaseStackName}:PublicSubnetTwo
           SecurityGroups:
             - Fn::ImportValue:
-                !Sub ${Environment}:blockmedi:ContainerSecurityGroup
+                !Sub ${Environment}:${BaseStackName}:ContainerSecurityGroup
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     DependsOn: Repository
@@ -55,15 +81,15 @@ Resources:
           Image: !Ref Repository
           Environment:
             - Name: CONNECTION_STRING
-              Value: !Sub '{{resolve:secretsmanager:arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mongo-connection-p0PIP1:SecretString:mongo}}'
+              Value: !Sub '{{resolve:secretsmanager:arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DatastoreConnectionStringName}:SecretString:${DatastoreConnectionString}}}'
             - Name: DATABASE
-              Value: 'blockmedi'
+              Value: !Sub ${DatabaseName}
             - Name: USER_POOL_ID
               Value:
-                Fn::ImportValue: !Sub ${Environment}:blockmedi:UserPoolId
+                Fn::ImportValue: !Sub ${Environment}:${BaseStackName}:UserPoolId
             - Name: USER_POOL_WEB_CLIENT_ID
               Value:
-                Fn::ImportValue: !Sub ${Environment}:blockmedi:UserPoolClient            
+                Fn::ImportValue: !Sub ${Environment}:${BaseStackName}:UserPoolClient            
             - Name: ECS_ENABLE_CONTAINER_METADATA
               Value: 'true'      
           PortMappings:
@@ -73,7 +99,7 @@ Resources:
             Options:
               awslogs-group: !Ref CloudWatchLogsGroup
               awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: blockmedi
+              awslogs-stream-prefix: !Sub ${BaseStackName}.${AWS::StackName}
   ECSTaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -85,19 +111,6 @@ Resources:
               Service: ecs-tasks.amazonaws.com
             Action: 'sts:AssumeRole'
       Policies:
-        #- PolicyName: ecs-task-execution
-        #  PolicyDocument:
-        #      Version: 2012-10-17
-        #      Statement:
-        #        - Effect: Allow
-        #          Action:
-        #            - ecr:GetAuthorizationToken
-        #            - ecr:BatchCheckLayerAvailability
-        #            - ecr:GetDownloadUrlForLayer
-        #            - ecr:BatchGetImage
-        #            - logs:CreateLogStream
-        #            - logs:PutLogEvent
-        #          Resource: '*'
         - PolicyName: ecs-service-discovery
           PolicyDocument:
               Version: 2012-10-17
@@ -154,13 +167,13 @@ Resources:
       Protocol: HTTPS
       UnhealthyThresholdCount: 2
       VpcId:
-        Fn::ImportValue: !Sub ${Environment}:blockmedi:VPCId
+        Fn::ImportValue: !Sub ${Environment}:${BaseStackName}:VPCId
   PrivateNamespace:
       Type: AWS::ServiceDiscovery::PrivateDnsNamespace
       Properties:
           Name: !Sub backend.api.${Environment}.blockmedisolutions.com
           Vpc:
-            Fn::ImportValue: !Sub ${Environment}:blockmedi:VPCId
+            Fn::ImportValue: !Sub ${Environment}:${BaseStackName}:VPCId
   DiscoveryService:
     Type: AWS::ServiceDiscovery::Service
     Properties: 
@@ -174,7 +187,7 @@ Resources:
             Type: SRV
       HealthCheckCustomConfig: 
         FailureThreshold: 1
-      Name: !Sub backend.api.${Environment}.blockmedisolutions.com
+      Name: !Sub backend.api.${Environment}.${BaseDNSName}.com
       NamespaceId: !Ref PrivateNamespace
   # Create a rule on the load balancer for routing traffic to the target group
 
@@ -186,13 +199,13 @@ Resources:
           Type: 'forward'
       LoadBalancerArn: 
         Fn::ImportValue: 
-          !Sub ${Environment}:blockmedi:PublicLoadBalancer
+          !Sub ${Environment}:${BaseStackName}:PublicLoadBalancer
       Port: 443
       Protocol: HTTPS
       Certificates:
         - CertificateArn: 
             Fn::ImportValue:
-              !Sub ${Environment}:blockmedi:environment-certificate
+              !Sub ${Environment}:${BaseStackName}:environment-certificate
 
   CloudWatchLogsGroup:
     Type: AWS::Logs::LogGroup
@@ -249,10 +262,10 @@ Resources:
                 Provider: GitHub
                 Version: '1'
               Configuration:
-                Repo: 'Blockmedi.BlockchainDB'
+                Repo: !Sub ${GithubRepoName}
                 Branch: !Ref GithubBranch
                 Owner: !Ref GithubOwner
-                OAuthToken: !Sub '{{resolve:secretsmanager:arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:GithubToken-b5jetG:SecretString:GithubToken}}'
+                OAuthToken: !Sub '{{resolve:secretsmanager:arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GithubTokenFullName}:SecretString:${GithubTokenName}}}'
               Region: !Ref "AWS::Region"
               RunOrder: 1
               OutputArtifacts:
@@ -283,7 +296,7 @@ Resources:
               Configuration:
                 ClusterName: 
                   Fn::ImportValue:
-                    !Sub ${Environment}:blockmedi:cluster-arn
+                    !Sub ${Environment}:${BaseStackName}:cluster-arn
                 ServiceName: !GetAtt Service.Name
                 FileName: images.json
               InputArtifacts:

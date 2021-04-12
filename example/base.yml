@@ -1,0 +1,268 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+  DNSName:
+    Type: String
+    Default: empty
+Mappings:
+  SubnetConfig:
+    VPC:
+      CIDR: '10.0.0.0/16'
+    PublicSubnetOne:
+      CIDR: '10.0.0.0/24'
+    PublicSubnetTwo:
+      CIDR: '10.0.1.0/24'
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap ['SubnetConfig', 'VPC', 'CIDR']
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-${AWS::StackName}
+  DNS:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Sub ${Environment}.${DNSName}.com
+  
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachement:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref 'VPC'
+      InternetGatewayId: !Ref 'InternetGateway'
+  PublicLoadBalancerSG:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Access to the public facing load balancer
+        VpcId: !Ref 'VPC'
+        SecurityGroupIngress:
+            - CidrIp: 0.0.0.0/0
+              IpProtocol: -1
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs: {Ref: 'AWS::Region'}
+      CidrBlock: !FindInMap ['SubnetConfig', 'PublicSubnetOne', 'CIDR']
+      MapPublicIpOnLaunch: true
+    DependsOn: VPC
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs: {Ref: 'AWS::Region'}
+      CidrBlock: !FindInMap ['SubnetConfig', 'PublicSubnetTwo', 'CIDR']
+      MapPublicIpOnLaunch: true
+    DependsOn: VPC
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref 'VPC'
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachement
+    Properties:
+      RouteTableId: !Ref 'PublicRouteTable'
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref 'InternetGateway'
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetOne
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetTwo
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '30'
+      Subnets:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+      SecurityGroups:
+        - !Ref PublicLoadBalancerSG
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties: 
+      DomainName: !Sub ${DNSName}.com
+      ValidationMethod: DNS
+      SubjectAlternativeNames:
+        - !Sub '*.${DNSName}.com'
+  EnvironmentCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties: 
+      DomainName: !Sub '*.${Environment}.${DNSName}.com'
+      ValidationMethod: DNS
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${Environment}-${AWS::StackName}  
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the Fargate containers
+      VpcId: !Ref VPC
+  ContainerSecurityGroupIngressFromALB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ContainerSecurityGroup
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSG
+      IpProtocol: -1
+  ContainerSecurityGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ContainerSecurityGroup
+      SourceSecurityGroupId: !Ref ContainerSecurityGroup
+      IpProtocol: -1
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'ec2:AttachNetworkInterface'
+              - 'ec2:CreateNetworkInterface'
+              - 'ec2:CreateNetworkInterfacePermission'
+              - 'ec2:DeleteNetworkInterface'
+              - 'ec2:DeleteNetworkInterfacePermission'
+              - 'ec2:Describe*'
+              - 'ec2:DetachNetworkInterface'
+              - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+              - 'elasticloadbalancing:DeregisterTargets'
+              - 'elasticloadbalancing:Describe*'
+              - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+              - 'elasticloadbalancing:RegisterTargets'
+            Resource: '*'
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${Environment}-users-pool
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: name
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: email
+          AttributeDataType: String
+          Mutable: false
+          Required: true
+        - Name: usertype
+          AttributeDataType: String
+          Mutable: false
+          Required: false
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties: 
+      ClientName: BackendClient
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      UserPoolId: !Ref UserPool
+Outputs:
+  VPCId:
+    Description: The ID of the VPC that this stack is deployed in
+    Value: !Ref 'VPC'
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'VPCId' ] ]
+  ClusterName:
+    Description: The name of the ECS cluster
+    Value: !Ref 'Cluster'
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'ClusterName' ] ]
+  ClusterArn:
+    Description: The name of the ECS cluster
+    Value: !GetAtt Cluster.Arn
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'cluster-arn' ] ]
+  ContainerSecurityGroup:
+    Description: A security group used to allow Fargate containers to receive traffic
+    Value: !Ref 'ContainerSecurityGroup'
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'ContainerSecurityGroup' ] ]
+  HostedZone:
+    Description: Hosted Zone
+    Value: !Ref DNS
+    Export:
+      Name: !Join [ '-', [ !Ref Environment, !Ref 'AWS::StackName', 'HostedZoneId' ] ]
+  HostedZoneName:
+    Description: Hosted Zone Name
+    Value: !Sub ${Environment}.${DNSName}.com
+    Export:
+      Name: !Join [ '-', [ !Ref Environment, !Ref 'AWS::StackName', 'HostedZoneName' ] ]
+  ECSRole:
+    Description: The ARN of the ECS role
+    Value: !GetAtt 'ECSRole.Arn'
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'ECSRole' ] ]
+  PublicSubnetOne:
+    Description: Public subnet one
+    Value: !Ref 'PublicSubnetOne'
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'PublicSubnetOne' ] ]
+  PublicSubnetTwo:
+    Description: Public subnet two
+    Value: !Ref 'PublicSubnetTwo'
+    Export:
+      Name: !Join [ ':', [  !Ref Environment, !Ref 'AWS::StackName', 'PublicSubnetTwo' ] ]
+  PublicLoadBalancer:
+    Description: The ARN of the public load balancer
+    Value: !Ref PublicLoadBalancer
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'PublicLoadBalancer' ] ]
+  UserPoolId:
+    Value: !Ref UserPool
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'UserPoolId' ] ]
+  UserPoolClient:
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'UserPoolClient' ] ]
+  Certificate:
+    Description: Certificate
+    Value: !Ref Certificate
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'certificate' ] ]
+  EnvironmentCertificate:
+    Description: Environment Specific Certificate
+    Value: !Ref EnvironmentCertificate
+    Export:
+      Name: !Join [ ':', [ !Ref Environment, !Ref 'AWS::StackName', 'environment-certificate' ] ]
